@@ -9,88 +9,110 @@ import time
 
 # --- CONFIGURATION ---
 MUSIC_FOLDER = "musique"
-wCam, hCam = 640, 480
-COOLDOWN_TIME = 2.0  # Temps d'attente entre deux changements de musique (secondes)
+wCam, hCam = 1280, 720  # HD
+COOLDOWN_TIME = 2.0 
 
-# --- VERIFICATIONS DOSSIER ---
+# --- COULEURS (BGR) ---
+C_DARK = (20, 20, 20)
+C_WHITE = (240, 240, 240)
+C_NEON_BLUE = (255, 200, 0)   # Cyan (BGR)
+C_NEON_GREEN = (50, 255, 50)  # Vert Matrix
+C_NEON_PURPLE = (255, 0, 255) # Magenta
+C_ALERT = (0, 0, 255)         # Rouge
+
+# --- VERIFICATIONS ---
 if not os.path.exists(MUSIC_FOLDER):
     print(f"ERREUR: Le dossier '{MUSIC_FOLDER}' n'existe pas !")
     sys.exit()
 
-# On charge TOUTES les musiques
 files = [f for f in os.listdir(MUSIC_FOLDER) if f.endswith(('.mp3', '.wav'))]
-files.sort() # On les trie par ordre alphabétique
-
+files.sort()
 if not files:
-    print(f"ERREUR: Mets des MP3 dans le dossier '{MUSIC_FOLDER}' !")
+    print(f"ERREUR: Dossier vide !")
     sys.exit()
 
-print(f"Playlist chargée : {len(files)} titres.")
-
-# --- VARIABLES GLOBALES ---
+# --- VARIABLES ---
 current_song_index = 0
-last_change_time = 0
+last_action_time = 0
 current_volume = 50
-current_speed = 1.0
+target_speed = 1.0
+is_in_effect = False 
 
-# --- SETUP VLC ---
+# --- VLC SETUP ---
 instance = vlc.Instance()
 player = instance.media_player_new()
 
 def play_song(index):
-    global current_song_index, current_speed
-    
-    # Gestion de la boucle (si on arrive à la fin, on revient au début)
-    if index >= len(files):
-        index = 0
-    elif index < 0:
-        index = len(files) - 1
+    global current_song_index, target_speed
+    if index >= len(files): index = 0
+    elif index < 0: index = len(files) - 1
         
     current_song_index = index
     song_path = os.path.join(MUSIC_FOLDER, files[current_song_index])
-    
-    print(f"Lecture de : {files[current_song_index]}")
     
     media = instance.media_new(song_path)
     player.set_media(media)
     player.play()
     
-    # On remet le volume et la vitesse (VLC reset la vitesse à chaque changement)
-    time.sleep(0.1) # Petit délai pour que VLC charge
+    time.sleep(0.1)
     player.audio_set_volume(int(current_volume))
-    player.set_rate(current_speed)
+    player.set_rate(target_speed)
 
-# Lancer la première musique
 play_song(0)
 
-# --- MEDIAPIPE SETUP ---
+# --- MEDIAPIPE ---
 mpHands = mp.solutions.hands
-hands = mpHands.Hands(
-    static_image_mode=False,
-    max_num_hands=2,
-    min_detection_confidence=0.7
-)
+hands = mpHands.Hands(max_num_hands=2, min_detection_confidence=0.7)
 mpDraw = mp.solutions.drawing_utils
 
-# --- CAMERA ---
 cap = cv2.VideoCapture(0)
 cap.set(3, wCam)
 cap.set(4, hCam)
 
-def draw_bar(img, x, y, value, min_val, max_val, color, text):
-    bar_height = 150
-    ratio = (value - min_val) / (max_val - min_val)
-    ratio = np.clip(ratio, 0, 1)
-    fill_height = int(bar_height * ratio)
-    cv2.rectangle(img, (x, y), (x + 20, y + bar_height), color, 2)
-    cv2.rectangle(img, (x, y + bar_height - fill_height), (x + 20, y + bar_height), color, cv2.FILLED)
-    cv2.putText(img, f'{text}', (x - 10, y + bar_height + 20), cv2.FONT_HERSHEY_PLAIN, 1, color, 1)
+# --- FONCTION D'INTERFACE (HUD) ---
+def draw_hud(img, vol, speed, song_name, effect_active):
+    h, w, c = img.shape
+    overlay = img.copy()
+    
+    # 1. BANDEAU DU HAUT (TITRE)
+    cv2.rectangle(overlay, (0, 0), (w, 80), C_DARK, cv2.FILLED)
+    
+    # 2. BANDEAU DU BAS (LEGENDE)
+    cv2.rectangle(overlay, (0, h-60), (w, h), C_DARK, cv2.FILLED)
+    
+    # 3. JAUGE VOLUME (GAUCHE)
+    vol_height = int((vol/100) * 300)
+    cv2.rectangle(overlay, (20, h//2 - 150), (60, h//2 + 150), C_DARK, cv2.FILLED) # Fond
+    cv2.rectangle(overlay, (20, h//2 + 150 - vol_height), (60, h//2 + 150), C_NEON_GREEN, cv2.FILLED) # Niveau
+    cv2.rectangle(overlay, (20, h//2 - 150), (60, h//2 + 150), C_WHITE, 2) # Bordure
+    cv2.putText(img, "VOL", (20, h//2 - 160), cv2.FONT_HERSHEY_PLAIN, 1.5, C_WHITE, 2)
+    cv2.putText(img, f"{int(vol)}%", (20, h//2 + 180), cv2.FONT_HERSHEY_PLAIN, 1.5, C_WHITE, 2)
 
-print("\n--- CONTROLES ---")
-print("🖐  Main GAUCHE (Pouce-Index)  = Volume")
-print("🖐  Main DROITE (Pouce-Index)  = Vitesse")
-print("⏭️  Main DROITE (Pouce-PINKY)  = Musique Suivante")
-print("❌  Touche 'q' pour quitter")
+    # 4. JAUGE VITESSE (DROITE)
+    # Speed va de 0.5 à 2.0. On normalise.
+    speed_ratio = (speed - 0.5) / 1.5
+    speed_height = int(speed_ratio * 300)
+    cv2.rectangle(overlay, (w-60, h//2 - 150), (w-20, h//2 + 150), C_DARK, cv2.FILLED)
+    cv2.rectangle(overlay, (w-60, h//2 + 150 - speed_height), (w-20, h//2 + 150), C_NEON_BLUE, cv2.FILLED)
+    cv2.rectangle(overlay, (w-60, h//2 - 150), (w-20, h//2 + 150), C_WHITE, 2)
+    cv2.putText(img, "BPM", (w-65, h//2 - 160), cv2.FONT_HERSHEY_PLAIN, 1.5, C_WHITE, 2)
+    cv2.putText(img, f"x{speed:.1f}", (w-65, h//2 + 180), cv2.FONT_HERSHEY_PLAIN, 1.5, C_WHITE, 2)
+
+    # APPLIQUER LA TRANSPARENCE
+    cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+
+    # TEXTES
+    cv2.putText(img, "DJ CONTROL CENTER", (w//2 - 150, 30), cv2.FONT_HERSHEY_DUPLEX, 0.8, C_NEON_BLUE, 1)
+    cv2.putText(img, song_name, (50, 65), cv2.FONT_HERSHEY_DUPLEX, 1.0, C_WHITE, 2)
+    
+    legend = "GAUCHE: Pincer=Vol | Plat=Matrix       DROITE: Pincer=Vitesse | Pinky=Suivant"
+    cv2.putText(img, legend, (50, h-20), cv2.FONT_HERSHEY_PLAIN, 1.2, C_WHITE, 1)
+
+    # EFFET MATRIX OVERLAY
+    if effect_active:
+        cv2.rectangle(img, (0, 0), (w, h), (0, 255, 0), 10) # Cadre vert
+        cv2.putText(img, "MATRIX EFFECT ACTIVATED", (w//2 - 300, h//2), cv2.FONT_HERSHEY_COMPLEX, 2.0, C_NEON_GREEN, 3)
+        cv2.putText(img, "SLOW MOTION...", (w//2 - 150, h//2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_WHITE, 2)
 
 while True:
     success, img = cap.read()
@@ -100,63 +122,83 @@ while True:
     imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     results = hands.process(imgRGB)
     
-    # Afficher le titre en cours sur l'écran
-    cv2.putText(img, f"Titre: {files[current_song_index]}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    
+    effect_active_this_frame = False
+    h, w, c = img.shape 
+
     if results.multi_hand_landmarks:
         for handLms, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
             label = handedness.classification[0].label
-            mpDraw.draw_landmarks(img, handLms, mpHands.HAND_CONNECTIONS)
+            
+            # Dessin des mains discret
+            mpDraw.draw_landmarks(img, handLms, mpHands.HAND_CONNECTIONS, 
+                                  mpDraw.DrawingSpec(color=(100,100,100), thickness=2, circle_radius=2),
+                                  mpDraw.DrawingSpec(color=(200,200,200), thickness=2, circle_radius=2))
             
             lmList = []
             for id, lm in enumerate(handLms.landmark):
-                h, w, c = img.shape
                 lmList.append([id, int(lm.x * w), int(lm.y * h)])
             
             if lmList:
-                # Coordonnées des bouts des doigts
-                x_pouce, y_pouce = lmList[4][1], lmList[4][2]
-                x_index, y_index = lmList[8][1], lmList[8][2]
-                x_pinky, y_pinky = lmList[20][1], lmList[20][2] # Bout du petit doigt
+                x4, y4 = lmList[4][1], lmList[4][2]     # Pouce
+                x8, y8 = lmList[8][1], lmList[8][2]     # Index
+                x12, y12 = lmList[12][1], lmList[12][2] # Majeur
+                x20, y20 = lmList[20][1], lmList[20][2] # Pinky
+                x0, y0 = lmList[0][1], lmList[0][2]     # Poignet
 
-                # Calcul distance Pouce-Index (Pour Volume/Vitesse)
-                length_index = math.hypot(x_index - x_pouce, y_index - y_pouce)
+                length_index = math.hypot(x8 - x4, y8 - y4)
                 
-                # MAIN GAUCHE : VOLUME
+                # --- MAIN GAUCHE ---
                 if label == 'Left':
-                    cx, cy = (x_pouce + x_index) // 2, (y_pouce + y_index) // 2
-                    cv2.line(img, (x_pouce, y_pouce), (x_index, y_index), (0, 255, 0), 3)
-                    
-                    vol = np.interp(length_index, [20, 200], [0, 100])
-                    current_volume = vol
-                    player.audio_set_volume(int(vol))
-                    draw_bar(img, 50, 150, vol, 0, 100, (0, 255, 0), "Vol")
+                    diff_hauteur = abs(y0 - y12)
+                    largeur_main = abs(x0 - x12)
 
-                # MAIN DROITE
+                    # Si main horizontale (MATRIX)
+                    if diff_hauteur < 60 and largeur_main > 80:
+                        effect_active_this_frame = True
+                        player.set_rate(0.3)
+                        cv2.line(img, (x0, y0), (x12, y12), C_NEON_GREEN, 5)
+
+                    else:
+                        # VOLUME
+                        vol = np.interp(length_index, [20, 200], [0, 100])
+                        current_volume = vol
+                        player.audio_set_volume(int(vol))
+                        if length_index < 200:
+                            cv2.line(img, (x4, y4), (x8, y8), C_NEON_GREEN, 3)
+                            cv2.circle(img, ((x4+x8)//2, (y4+y8)//2), 10, C_NEON_GREEN, cv2.FILLED)
+
+                # --- MAIN DROITE ---
                 elif label == 'Right':
-                    # 1. CONTROLE VITESSE (Pouce-Index)
-                    cv2.line(img, (x_pouce, y_pouce), (x_index, y_index), (255, 0, 0), 3)
+                    # VITESSE
                     speed = np.interp(length_index, [20, 200], [0.5, 2.0])
+                    if abs(target_speed - speed) > 0.05:
+                        target_speed = speed
                     
-                    if abs(current_speed - speed) > 0.05:
-                        current_speed = speed
-                        player.set_rate(current_speed)
-                    draw_bar(img, wCam - 70, 150, speed, 0.5, 2.0, (255, 0, 0), "Speed")
+                    if not effect_active_this_frame:
+                         player.set_rate(target_speed)
 
-                    # 2. CONTROLE SUIVANT (Pouce-Pinky)
-                    # On calcule la distance entre le Pouce (4) et le Petit Doigt (20)
-                    length_pinky = math.hypot(x_pinky - x_pouce, y_pinky - y_pouce)
-                    
-                    # Si pincement détecté (< 30 pixels) ET que le temps d'attente est passé
-                    if length_pinky < 30 and (time.time() - last_change_time) > COOLDOWN_TIME:
-                        print(">>> NEXT SONG ! >>>")
+                    if length_index < 200:
+                        cv2.line(img, (x4, y4), (x8, y8), C_NEON_BLUE, 3)
+                        cv2.circle(img, ((x4+x8)//2, (y4+y8)//2), 10, C_NEON_BLUE, cv2.FILLED)
+
+                    # SUIVANT
+                    length_pinky = math.hypot(x20 - x4, y20 - y4)
+                    if length_pinky < 30 and (time.time() - last_action_time) > COOLDOWN_TIME:
                         play_song(current_song_index + 1)
-                        last_change_time = time.time() # Reset du chrono
-                        
-                        # Petit feedback visuel (Cercle Jaune)
-                        cv2.circle(img, (x_pinky, y_pinky), 15, (0, 255, 255), cv2.FILLED)
+                        last_action_time = time.time()
+                        cv2.circle(img, (x20, y20), 25, C_NEON_PURPLE, cv2.FILLED)
+                        # --- CORRECTION ICI (FONT_HERSHEY_DUPLEX) ---
+                        cv2.putText(img, "NEXT!", (x20, y20-40), cv2.FONT_HERSHEY_DUPLEX, 1, C_NEON_PURPLE, 2)
 
-    cv2.imshow("DJ Control - Next Gen", img)
+    # Gestion fin effet Matrix
+    if not effect_active_this_frame and is_in_effect:
+        player.set_rate(target_speed)
+    is_in_effect = effect_active_this_frame
+
+    # INTERFACE
+    draw_hud(img, current_volume, target_speed, files[current_song_index], is_in_effect)
+
+    cv2.imshow("DJ Control - GUI EDITION", img)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
